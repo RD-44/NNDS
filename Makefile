@@ -22,9 +22,18 @@ CFLAGS := -mthumb -mthumb-interwork $(ARCH) -O2 -Wall -Wextra -ffunction-section
           -I$(SOURCE_DIR) -I$(DEVKITPRO)/libnds/include -I$(DEVKITPRO)/calico/include -DARM9 -D__NDS__
 
 LDFLAGS := -T$(DEVKITPRO)/calico/lib/ds9.ld -Wl,-Map,$(BUILD_DIR)/$(TARGET).map -Wl,--gc-sections \
+           -Wl,--no-warn-rwx-segments \
            -L$(DEVKITPRO)/libnds/lib -L$(DEVKITPRO)/calico/lib -lnds9 -lcalico_ds9 -lfat -lm
 
 PYTHON := $(CURDIR)/.venv/bin/python3
+
+# Emulator launcher (override with: make run MELONDS=/path/to/melonDS)
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+MELONDS ?= open -a melonDS
+else
+MELONDS ?= melonDS
+endif
 
 # Source files
 SOURCES := $(SOURCE_DIR)/main.c \
@@ -33,6 +42,8 @@ SOURCES := $(SOURCE_DIR)/main.c \
            $(SOURCE_DIR)/layers/conv2d.c \
            $(SOURCE_DIR)/layers/maxpool.c \
            $(SOURCE_DIR)/layers/fc.c
+
+HEADERS := $(wildcard $(SOURCE_DIR)/*.h) $(wildcard $(SOURCE_DIR)/layers/*.h)
 
 OBJECTS := $(SOURCES:$(SOURCE_DIR)/%.c=$(BUILD_DIR)/%.o)
 
@@ -62,7 +73,7 @@ $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS)
 	@echo "Build complete: $@"
 	@$(SIZE) $@
 
-$(BUILD_DIR)/%.o: $(SOURCE_DIR)/%.c
+$(BUILD_DIR)/%.o: $(SOURCE_DIR)/%.c $(SOURCE_DIR)/model.h $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -81,7 +92,7 @@ test_vectors.npz: $(TOOLS_DIR)/validate.py $(CHECKPOINTS_DIR)/quantized_ultra_ti
 	$(PYTHON) $(TOOLS_DIR)/validate.py
 
 run: $(BUILD_DIR)/$(TARGET).nds
-	melonDS $<
+	$(MELONDS) $<
 
 clean:
 	rm -rf $(BUILD_DIR)

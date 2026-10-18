@@ -40,14 +40,14 @@ static inline int32_t q31_mul_shift(int32_t a, int32_t b, int shift) {
 // zp: output zero point
 // Returns UINT8
 static inline uint8_t requantize_u8(int32_t acc, int32_t mult, int shift, int32_t zp) {
-    int64_t tmp = (int64_t)acc * mult;
+    int64_t tmp = (int64_t)acc * mult + ((int64_t)1 << (shift - 1));
     int32_t requantized = (int32_t)(tmp >> shift) + zp;
     return saturate_u8(requantized);
 }
 
 // Requantize INT32 accumulator to INT8 output
 static inline int8_t requantize_i8(int32_t acc, int32_t mult, int shift, int32_t zp) {
-    int64_t tmp = (int64_t)acc * mult;
+    int64_t tmp = (int64_t)acc * mult + ((int64_t)1 << (shift - 1));
     int32_t requantized = (int32_t)(tmp >> shift) + zp;
     return saturate_i8(requantized);
 }

@@ -4,6 +4,7 @@
 int conv2d_run(const Conv2DLayer* layer, 
                const uint8_t* input, int H, int W,
                uint8_t* output, TensorArena* arena) {
+    (void)arena;
     
     const int C_in = layer->in_channels;
     const int C_out = layer->out_channels;
@@ -11,6 +12,7 @@ int conv2d_run(const Conv2DLayer* layer,
     const int KW = layer->kernel_w;
     const int stride = layer->stride;
     const int pad = layer->padding;
+    const int32_t in_zp = layer->input_zp;
     
     const int H_out = (H + 2 * pad - KH) / stride + 1;
     const int W_out = (W + 2 * pad - KW) / stride + 1;
@@ -21,9 +23,7 @@ int conv2d_run(const Conv2DLayer* layer,
         const int32_t mult = layer->output_mult[oc];
         const int shift = layer->output_shift[oc];
         const int32_t out_zp = layer->output_zp;
-        
-        const float w_scale = layer->weight_scale[oc];
-        const int32_t w_zp = layer->weight_zp ? layer->weight_zp[oc] : 0;
+        const int32_t w_zp = layer->weight_zp[oc];
         
         // Weight pointer for this output channel: [C_in, KH, KW]
         const int8_t* w_ptr = &layer->weight[oc * C_in * KH * KW];
@@ -49,11 +49,13 @@ int conv2d_run(const Conv2DLayer* layer,
                             const int input_idx = (ih * W + iw) * C_in + ic;
                             const int weight_idx = (ic * KH + kh) * KW + kw;
                             
-                            uint8_t x_q = input[input_idx];
-                            int8_t w_q = w_ptr[weight_idx];
+                            // Quantized values with zero points corrected.
+                            // Out-of-bounds taps are skipped entirely: PyTorch pads with
+                            // real zero, i.e. (in_zp - in_zp) * w = 0.
+                            const int32_t x_c = (int32_t)input[input_idx] - in_zp;
+                            const int32_t w_c = (int32_t)w_ptr[weight_idx] - w_zp;
                             
-                            // INT8 * UINT8 -> INT32
-                            acc += (int32_t)w_q * (int32_t)x_q;
+                            acc += x_c * w_c;
                         }
                     }
                 }

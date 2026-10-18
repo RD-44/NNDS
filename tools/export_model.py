@@ -8,6 +8,25 @@ sys.path.append(os.path.join(os.path.dirname(__file__)))
 from model_def import get_model
 
 
+def extract_bias(bias_tensor, n):
+    """Return the float bias, or None if the tensor is already integer."""
+    if bias_tensor is None:
+        return None
+    b = bias_tensor.detach().cpu()
+    if b.dtype in (torch.int32, torch.int64, torch.qint32):
+        return b.numpy().astype(np.int64)
+    return b.numpy().astype(np.float64)
+
+
+def quantize_bias(bias_float_or_int, weight_scale, input_scale):
+    """Compute int32 bias the way PyTorch does: round(b / (w_scale * in_scale))."""
+    if bias_float_or_int is None:
+        return None
+    if np.issubdtype(np.asarray(bias_float_or_int).dtype, np.integer):
+        return np.asarray(bias_float_or_int).astype(np.int32)
+    return np.round(bias_float_or_int / (weight_scale.astype(np.float64) * input_scale)).astype(np.int32)
+
+
 def extract_quantized_conv2d(layer, prefix):
     """Extract quantized Conv2D layer weights and quantization params."""
     # Weight: [out_ch, in_ch, kH, kW] INT8
@@ -17,8 +36,8 @@ def extract_quantized_conv2d(layer, prefix):
     w_scale = layer.weight().q_per_channel_scales().detach().cpu().numpy().astype(np.float32)
     w_zp = layer.weight().q_per_channel_zero_points().detach().cpu().numpy().astype(np.int32)
     
-    # Bias: INT32 (already quantized)
-    bias = layer.bias().detach().cpu().numpy().astype(np.int32) if layer.bias() is not None else np.zeros(weight.shape[0], dtype=np.int32)
+    # Bias: qnnpack stores it as float; int32 is derived at export time via quantize_bias()
+    bias_float = extract_bias(layer.bias(), weight.shape[0])
     
     # Output scale/zp (this layer's output quantization)
     out_scale = float(layer.scale)
@@ -35,7 +54,8 @@ def extract_quantized_conv2d(layer, prefix):
     
     return {
         'weight': weight,
-        'bias': bias,
+        'bias_float': bias_float,
+        'bias': np.zeros(weight.shape[0], dtype=np.int32),
         'weight_scale': w_scale,
         'weight_zp': w_zp,
         'input_scale': np.array([in_scale], dtype=np.float32),
@@ -68,7 +88,7 @@ def extract_quantized_linear(layer, prefix):
         w_scale = np.array([float(layer.weight().q_scale())], dtype=np.float32)
         w_zp = np.array([int(layer.weight().q_zero_point())], dtype=np.int32)
     
-    bias = layer.bias().detach().cpu().numpy().astype(np.int32) if layer.bias() is not None else np.zeros(weight.shape[0], dtype=np.int32)
+    bias_float = extract_bias(layer.bias(), weight.shape[0])
     
     # Output scale/zp
     out_scale = float(layer.scale)
@@ -84,7 +104,8 @@ def extract_quantized_linear(layer, prefix):
     
     return {
         'weight': weight,
-        'bias': bias,
+        'bias_float': bias_float,
+        'bias': np.zeros(weight.shape[0], dtype=np.int32),
         'weight_scale': w_scale,
         'weight_zp': w_zp,
         'input_scale': np.array([in_scale], dtype=np.float32),
@@ -123,7 +144,16 @@ def generate_c_array(name, data, dtype='int8_t'):
     return "\n".join(lines)
 
 
-def generate_c_header(model, model_name, output_path):
+def find_input_qparams(model):
+    """Find the graph's input quantize node and return (scale, zero_point)."""
+    for node in model.graph.nodes:
+        if node.op == 'call_function' and 'quantize_per_tensor' in str(node.target):
+            scale_node, zp_node = node.args[1], node.args[2]
+            return float(getattr(model, scale_node.target)), int(getattr(model, zp_node.target))
+    raise RuntimeError('no quantize_per_tensor node found in graph')
+
+
+def generate_c_header(model, model_name, output_path, input_scale, input_zp):
     """Generate complete model.h for DS."""
     lines = [
         f"// Auto-generated from {model_name}",
@@ -161,9 +191,11 @@ def generate_c_header(model, model_name, output_path):
     fc2 = extract_quantized_linear(model.fc2, "fc2")
     layer_data.append(('fc2', fc2))
     
-    # Chain input/output scales: each layer's input = previous layer's output
-    prev_out_scale = 0.0039215686  # model_input_scale = 1/255
-    prev_out_zp = 0
+    # Chain input/output scales: each layer's input = previous layer's output.
+    # The first layer's input is the graph input quantizer (observed during calibration),
+    # NOT a hardcoded 1/255 - hardcoding it silently breaks the requantization multipliers.
+    prev_out_scale = input_scale
+    prev_out_zp = input_zp
     
     for name, data in layer_data:
         if name.startswith('conv') or name.startswith('fc'):
@@ -176,13 +208,18 @@ def generate_c_header(model, model_name, output_path):
             combined_scale = (w_scale * prev_out_scale) / out_scale
             data['output_mult'] = np.round(combined_scale * (1 << 31)).astype(np.int32)
             
+            # Quantize bias like PyTorch does: round(b_float / (w_scale * in_scale))
+            bias = quantize_bias(data['bias_float'], w_scale, prev_out_scale)
+            if bias is not None:
+                data['bias'] = bias
+            
             prev_out_scale = data['output_scale'][0]
             prev_out_zp = data['output_zp'][0]
     
-    # Input: 1x28x28 UINT8 (0-255)
-    lines.append("// Input quantization (from touchscreen preprocessing)")
-    lines.append("const float model_input_scale = 0.0039215686f;  // 1/255")
-    lines.append("const int32_t model_input_zp = 0;")
+    # Input: 1x28x28 UINT8 (0-255) - pixel values map 1:1 onto the model's input quantizer
+    lines.append("// Input quantization (touchscreen preprocessing feeds raw pixel values)")
+    lines.append(f"const float model_input_scale = {input_scale}f;")
+    lines.append(f"const int32_t model_input_zp = {input_zp};")
     lines.append("")
     
     # Generate arrays for each layer
@@ -251,9 +288,12 @@ def main():
     model = quantize_model(float_model, test_loader, device)
     model.eval()
     
+    input_scale, input_zp = find_input_qparams(model)
+    print(f"Input quantizer: scale={input_scale}, zp={input_zp}")
+    
     import os
     output_path = os.path.join(os.path.dirname(__file__), "..", "source", "model.h")
-    generate_c_header(model, model_name, output_path)
+    generate_c_header(model, model_name, output_path, input_scale, input_zp)
 
 
 if __name__ == "__main__":
