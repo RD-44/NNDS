@@ -55,7 +55,7 @@ full: pipeline $(BUILD_DIR)/$(TARGET).nds
 
 # DS build
 $(BUILD_DIR)/$(TARGET).nds: $(BUILD_DIR)/$(TARGET).elf
-	$(NDSTOOL) -c $@ -9 $< -7 $(DEVKITPRO)/calico/bin/ds7_maine.elf -b $(DEVKITPRO)/calico/share/nds-icon.bmp "$(TARGET);built with devkitARM;http://devkitpro.org"
+	$(NDSTOOL) -c $@ -9 $< -7 $(DEVKITPRO)/calico/bin/ds7_lykoi.elf -b $(DEVKITPRO)/calico/share/nds-icon.bmp "$(TARGET);built with devkitARM;http://devkitpro.org"
 
 $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)

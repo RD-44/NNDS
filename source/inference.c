@@ -5,6 +5,7 @@
 #include "model.h"
 #include "tensor_arena.h"
 #include "fixed_point.h"
+#include <stdio.h>
 
 // Global arena
 static TensorArena g_arena;
@@ -142,33 +143,58 @@ int inference_run(const uint8_t* input, uint8_t* output_logits) {
     // Input: 28x28x1 UINT8
     uint8_t* tensor1 = tensor_arena_alloc_u8(&g_arena, 28 * 28 * 1);
     if (!tensor1) return -1;
-    // Copy input (already in correct format)
     for (int i = 0; i < 28 * 28; i++) tensor1[i] = input[i];
+    
+    // Debug: print input stats
+    int non_zero = 0;
+    for (int i = 0; i < 28*28; i++) if (tensor1[i] > 0) non_zero++;
+    iprintf("\x1b[22;0HInput non-zero: %d   ", non_zero);
     
     // Conv1: 28x28x1 -> 28x28x6
     uint8_t* tensor2 = tensor_arena_alloc_u8(&g_arena, 28 * 28 * 6);
     if (!tensor2) return -1;
     conv2d_run(&conv1_layer, tensor1, 28, 28, tensor2, &g_arena);
     
+    // Debug: check conv1 output
+    non_zero = 0;
+    for (int i = 0; i < 28*28*6; i++) if (tensor2[i] > 0) non_zero++;
+    iprintf("\x1b[22;0HConv1 non-zero: %d   ", non_zero);
+    
     // Pool1: 28x28x6 -> 14x14x6
     uint8_t* tensor3 = tensor_arena_alloc_u8(&g_arena, 14 * 14 * 6);
     if (!tensor3) return -1;
     maxpool_run(&pool1_layer, tensor2, 28, 28, 6, tensor3);
+    
+    non_zero = 0;
+    for (int i = 0; i < 14*14*6; i++) if (tensor3[i] > 0) non_zero++;
+    iprintf("\x1b[23;0HPool1 non-zero: %d   ", non_zero);
     
     // Conv2: 14x14x6 -> 14x14x12
     uint8_t* tensor4 = tensor_arena_alloc_u8(&g_arena, 14 * 14 * 12);
     if (!tensor4) return -1;
     conv2d_run(&conv2_layer, tensor3, 14, 14, tensor4, &g_arena);
     
+    non_zero = 0;
+    for (int i = 0; i < 14*14*12; i++) if (tensor4[i] > 0) non_zero++;
+    iprintf("\x1b[23;0HConv2 non-zero: %d   ", non_zero);
+    
     // Pool2: 14x14x12 -> 7x7x12
     uint8_t* tensor5 = tensor_arena_alloc_u8(&g_arena, 7 * 7 * 12);
     if (!tensor5) return -1;
     maxpool_run(&pool2_layer, tensor4, 14, 14, 12, tensor5);
     
+    non_zero = 0;
+    for (int i = 0; i < 7*7*12; i++) if (tensor5[i] > 0) non_zero++;
+    iprintf("\x1b[24;0HPool2 non-zero: %d   ", non_zero);
+    
     // FC1: 588 -> 16
     uint8_t* tensor6 = tensor_arena_alloc_u8(&g_arena, 16);
     if (!tensor6) return -1;
     fc_run(&fc1_layer, tensor5, tensor6, &g_arena);
+    
+    non_zero = 0;
+    for (int i = 0; i < 16; i++) if (tensor6[i] > 0) non_zero++;
+    iprintf("\x1b[24;0HFC1 non-zero: %d   ", non_zero);
     
     // FC2: 16 -> 10 (output logits)
     fc_run(&fc2_layer, tensor6, output_logits, &g_arena);
