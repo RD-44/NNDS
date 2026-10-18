@@ -1,0 +1,21 @@
+# Build outputs
+build/
+*.nds
+*.elf
+*.map
+
+# Python checkpoints and data
+checkpoints/
+tools/data/
+tools/__pycache__/
+*.pyc
+
+# Generated files
+source/model.h
+test_vectors.npz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
