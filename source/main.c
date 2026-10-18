@@ -57,8 +57,11 @@ static const uint8_t test_input[784] = {
 #define CANVAS_W 256
 #define CANVAS_H 192
 
-// Drawing box (perfect square, centered on the canvas)
-#define BOX_SIZE 160
+// Drawing box: the interior is exactly the 28x28 MNIST input upscaled by
+// MNIST_SCALE screen pixels per MNIST pixel, so drawn proportions match
+// the training data with no rescaling
+#define MNIST_SCALE 5
+#define BOX_SIZE (28 * MNIST_SCALE + 2)
 #define BOX_X ((CANVAS_W - BOX_SIZE) / 2)
 #define BOX_Y ((CANVAS_H - BOX_SIZE) / 2)
 
@@ -164,69 +167,58 @@ void draw_prediction(int digit, float confidence) {
     iprintf("\x1b[17;0H%s", buf);
 }
 
-// Convert stroke points to 28x28 centered image
+// Set an MNIST cell to at least the given intensity (keeps the strongest value)
+static void mnist_set(int mx, int my, uint8_t v) {
+    if (mx < 0 || mx >= 28 || my < 0 || my >= 28) return;
+    uint8_t* p = &input_buffer[my * 28 + mx];
+    if (*p < v) *p = v;
+}
+
+// Plot one screen-space point: a 255 core cell with 128 edge cells, mimicking
+// the anti-aliased gray edges of MNIST training digits
+static void mnist_plot_point(int sx, int sy) {
+    int mx = (sx - (BOX_X + 1)) / MNIST_SCALE;
+    int my = (sy - (BOX_Y + 1)) / MNIST_SCALE;
+    
+    mnist_set(mx, my, 255);
+    mnist_set(mx - 1, my, 128);
+    mnist_set(mx + 1, my, 128);
+    mnist_set(mx, my - 1, 128);
+    mnist_set(mx, my + 1, 128);
+}
+
+// Convert the drawn strokes into the 28x28 input buffer. The box interior maps
+// 1:1 onto the MNIST grid (MNIST_SCALE screen px per cell), so one brush dot
+// turns on exactly one MNIST pixel, proportionally identical to the training data
 void stroke_to_mnist() {
-    if (stroke_count < 2) return;
-    
-    // Find bounding box
-    int min_x = CANVAS_W, max_x = 0;
-    int min_y = CANVAS_H, max_y = 0;
-    
-    for (int i = 0; i < stroke_count; i++) {
-        if (stroke_points[i].x < min_x) min_x = stroke_points[i].x;
-        if (stroke_points[i].x > max_x) max_x = stroke_points[i].x;
-        if (stroke_points[i].y < min_y) min_y = stroke_points[i].y;
-        if (stroke_points[i].y > max_y) max_y = stroke_points[i].y;
-    }
-    
-    int stroke_w = max_x - min_x;
-    int stroke_h = max_y - min_y;
-    if (stroke_w == 0) stroke_w = 1;
-    if (stroke_h == 0) stroke_h = 1;
-    
-    // Scale to fit in 20x20 box, centered in 28x28
-    const int target_size = 20;
-    float scale_x = (float)target_size / stroke_w;
-    float scale_y = (float)target_size / stroke_h;
-    float scale = (scale_x < scale_y) ? scale_x : scale_y;
-    
-    int scaled_w = (int)(stroke_w * scale);
-    int scaled_h = (int)(stroke_h * scale);
-    int offset_x = (28 - scaled_w) / 2;
-    int offset_y = (28 - scaled_h) / 2;
-    
-    // Save stroke count before clearing
-    int saved_stroke_count = stroke_count;
+    if (stroke_count < 1) return;
     
     // Clear buffer only (don't reset stroke_count)
     memset(input_buffer, 0, sizeof(input_buffer));
     drawing = false;
     
-    // Draw stroke into 28x28 buffer with anti-aliasing (simple)
-    for (int i = 1; i < saved_stroke_count; i++) {
-        int x0 = (int)((stroke_points[i-1].x - min_x) * scale) + offset_x;
-        int y0 = (int)((stroke_points[i-1].y - min_y) * scale) + offset_y;
-        int x1 = (int)((stroke_points[i].x - min_x) * scale) + offset_x;
-        int y1 = (int)((stroke_points[i].y - min_y) * scale) + offset_y;
+    for (int i = 0; i < stroke_count; i++) {
+        const int x1 = stroke_points[i].x;
+        const int y1 = stroke_points[i].y;
         
-        // Bresenham line
-        int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-        int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-        int err = dx + dy, e2;
-        
-        while (true) {
-            if (x0 >= 0 && x0 < 28 && y0 >= 0 && y0 < 28) {
-                input_buffer[y0 * 28 + x0] = 255;
-                if (x0 > 0) input_buffer[y0 * 28 + x0 - 1] = 255;
-                if (x0 < 27) input_buffer[y0 * 28 + x0 + 1] = 255;
-                if (y0 > 0) input_buffer[(y0-1) * 28 + x0] = 255;
-                if (y0 < 27) input_buffer[(y0+1) * 28 + x0] = 255;
+        if (i > 0) {
+            int x0 = stroke_points[i-1].x;
+            int y0 = stroke_points[i-1].y;
+            
+            // Bresenham in screen space between consecutive touch samples
+            int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+            int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy, e2;
+            
+            while (x0 != x1 || y0 != y1) {
+                mnist_plot_point(x0, y0);
+                e2 = 2 * err;
+                if (e2 >= dy) { err += dy; x0 += sx; }
+                if (e2 <= dx) { err += dx; y0 += sy; }
             }
-            if (x0 == x1 && y0 == y1) break;
-            e2 = 2 * err;
-            if (e2 >= dy) { err += dy; x0 += sx; }
-            if (e2 <= dx) { err += dx; y0 += sy; }
         }
+        
+        mnist_plot_point(x1, y1);
     }
 }
 
@@ -327,16 +319,21 @@ int main() {
             // Clear drawing area (keep box border)
             clear_drawing_area();
             
-            // Draw test input scaled 4x (112x112) centered in the drawing box
+            // Draw test input: the exact 28x28 network input, one MNIST pixel
+            // per MNIST_SCALE x MNIST_SCALE cell, shaded by its intensity so
+            // anti-aliased (light gray) pixels stay visible
             for (int y = 0; y < 28; y++) {
                 for (int x = 0; x < 28; x++) {
-                    if (test_input[y * 28 + x] > 128) {
-                        int px = BOX_X + (BOX_SIZE - 112) / 2 + x * 4;
-                        int py = BOX_Y + (BOX_SIZE - 112) / 2 + y * 4;
-                        for (int dy = 0; dy < 4; dy++) {
-                            for (int dx = 0; dx < 4; dx++) {
-                                BG_GFX[(py + dy) * 256 + px + dx] = ARGB16(1, 31, 31, 31);
-                            }
+                    uint8_t v = test_input[y * 28 + x];
+                    if (v == 0) continue;
+                    int shade = (v + 7) / 8;
+                    if (shade > 31) shade = 31;
+                    uint16_t color = ARGB16(1, shade, shade, shade);
+                    int px = BOX_X + 1 + x * MNIST_SCALE;
+                    int py = BOX_Y + 1 + y * MNIST_SCALE;
+                    for (int dy = 0; dy < MNIST_SCALE; dy++) {
+                        for (int dx = 0; dx < MNIST_SCALE; dx++) {
+                            BG_GFX[(py + dy) * 256 + px + dx] = color;
                         }
                     }
                 }
@@ -367,27 +364,35 @@ int main() {
             // Ignore the stylus until it is lifted if a clear just happened,
             // otherwise a still-held stylus would paint right after clearing
             if (!touch_locked) {
+                // Clamp the brush center to the drawable interior
+                int cx = touch.px;
+                int cy = touch.py;
+                if (cx < BOX_X + 1) cx = BOX_X + 1;
+                if (cx > BOX_X + BOX_SIZE - 2) cx = BOX_X + BOX_SIZE - 2;
+                if (cy < BOX_Y + 1) cy = BOX_Y + 1;
+                if (cy > BOX_Y + BOX_SIZE - 2) cy = BOX_Y + BOX_SIZE - 2;
+                
                 if (!drawing) {
                     drawing = true;
                     stroke_count = 0;
-                    last_px = touch.px;
-                    last_py = touch.py;
+                    last_px = cx;
+                    last_py = cy;
                     
                     // Clear prediction area when starting new drawing
                     clear_prediction_area();
                 }
                 
                 if (stroke_count < MAX_STROKE_POINTS) {
-                    stroke_points[stroke_count].x = touch.px;
-                    stroke_points[stroke_count].y = touch.py;
+                    stroke_points[stroke_count].x = cx;
+                    stroke_points[stroke_count].y = cy;
                     stroke_points[stroke_count].active = true;
                     stroke_count++;
                 }
                 
                 // Connect the previous sample to the current one so fast strokes have no gaps
-                draw_brush_line(last_px, last_py, touch.px, touch.py);
-                last_px = touch.px;
-                last_py = touch.py;
+                draw_brush_line(last_px, last_py, cx, cy);
+                last_px = cx;
+                last_py = cy;
             }
         } else {
             drawing = false;
