@@ -1,125 +1,93 @@
-# NNDS Makefile using devkitPro standard build system
+# NNDS Makefile - standalone, no recursive make
 
-ifeq ($(strip $(DEVKITARM)),)
-$(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
-endif
+DEVKITARM := /opt/devkitpro/devkitARM
+DEVKITPRO := /opt/devkitpro
 
-include $(DEVKITARM)/ds_rules
+PREFIX := $(DEVKITARM)/bin/arm-none-eabi-
+CC := $(PREFIX)gcc
+CXX := $(PREFIX)g++
+OBJCOPY := $(PREFIX)objcopy
+SIZE := $(PREFIX)size
+NDSTOOL := ndstool
 
-# Project settings
-TARGET   := mnist_ds
-BUILD    := build
-SOURCES  := source source/layers
-INCLUDES := source source/layers
-DATA     :=
-GRAPHICS :=
-AUDIO    :=
-ICON     :=
-
-ARCH := -march=armv5te -mtune=arm946e-s
-
-CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH) $(INCLUDE) -DARM9
-CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
-ASFLAGS  := -g $(ARCH)
-LDFLAGS  := -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
-
-LIBS := -lnds9
-
-LIBDIRS := $(LIBNDS) $(PORTLIBS)
-
-# Python pipeline targets
-PYTHON := python3
+TARGET := mnist_ds
+BUILD_DIR := build
+SOURCE_DIR := source
 TOOLS_DIR := tools
 CHECKPOINTS_DIR := checkpoints
 
-# Override source detection to include layers subdirectory
-CFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+ARCH := -march=armv5te -mtune=arm946e-s
 
-# Project root directory (works from both project root and build directory)
-PROJECT_ROOT := $(shell pwd)
+CFLAGS := -mthumb -mthumb-interwork $(ARCH) -O2 -Wall -Wextra -ffunction-sections -fdata-sections \
+          -I$(SOURCE_DIR) -I$(DEVKITPRO)/libnds/include -I$(DEVKITPRO)/calico/include -DARM9 -D__NDS__
 
-export OUTPUT := $(PROJECT_ROOT)/$(TARGET)
-export VPATH := $(foreach dir,$(SOURCES),$(PROJECT_ROOT)/$(dir))\
-                $(foreach dir,$(DATA),$(PROJECT_ROOT)/$(dir))\
-                $(foreach dir,$(GRAPHICS),$(PROJECT_ROOT)/$(dir))
-export DEPSDIR := $(PROJECT_ROOT)/$(BUILD)
+LDFLAGS := -T$(DEVKITPRO)/calico/lib/ds9.ld -Wl,-Map,$(BUILD_DIR)/$(TARGET).map -Wl,--gc-sections \
+           -L$(DEVKITPRO)/libnds/lib -L$(DEVKITPRO)/calico/lib -lnds9 -lcalico_ds9 -lfat -lm
 
-OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES := $(OFILES_SOURCES)
-export HFILES := $(OFILES_SOURCES:.o=.h)
+PYTHON := $(CURDIR)/.venv/bin/python3
 
-export INCLUDE  := $(foreach dir,$(INCLUDES),-iquote $(PROJECT_ROOT)/$(dir))\
-                   $(foreach dir,$(LIBDIRS),-I$(dir)/include)\
-                   -I$(PROJECT_ROOT)/$(BUILD)
-export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+# Source files
+SOURCES := $(SOURCE_DIR)/main.c \
+           $(SOURCE_DIR)/inference.c \
+           $(SOURCE_DIR)/tensor_arena.c \
+           $(SOURCE_DIR)/layers/conv2d.c \
+           $(SOURCE_DIR)/layers/maxpool.c \
+           $(SOURCE_DIR)/layers/fc.c
 
-# Use CC for linking C projects
-export LD := $(CC)
+OBJECTS := $(SOURCES:$(SOURCE_DIR)/%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all train quantize export validate pipeline run clean clean-all $(BUILD)
+.PHONY: all train quantize export validate pipeline run clean clean-all
 
-ifeq ($(BUILD),$(notdir $(CURDIR)))
-
-#---------------------------------------------------------------------------------
-# Running from build directory - main build targets
-#---------------------------------------------------------------------------------
-all: $(OUTPUT).nds
+all: $(BUILD_DIR)/$(TARGET).nds
 
 # Python pipeline
 train: $(CHECKPOINTS_DIR)/best_ultra_tiny_cnn.pt
 
 quantize: $(CHECKPOINTS_DIR)/quantized_ultra_tiny_cnn.pt
 
-export: $(CURDIR)/source/model.h
+export: $(SOURCE_DIR)/model.h
 
 validate: test_vectors.npz
 
 pipeline: train quantize export validate
 
-# Full build pipeline
-full: pipeline $(OUTPUT).nds
+full: pipeline $(BUILD_DIR)/$(TARGET).nds
+
+# DS build
+$(BUILD_DIR)/$(TARGET).nds: $(BUILD_DIR)/$(TARGET).elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(DEVKITPRO)/calico/bin/ds7_maine.elf -b $(DEVKITPRO)/calico/share/nds-icon.bmp "$(TARGET);built with devkitARM;http://devkitpro.org"
+
+$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Build complete: $@"
+	@$(SIZE) $@
+
+$(BUILD_DIR)/%.o: $(SOURCE_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # Python steps
 $(CHECKPOINTS_DIR)/best_ultra_tiny_cnn.pt: $(TOOLS_DIR)/train.py $(TOOLS_DIR)/model_def.py
 	@mkdir -p $(CHECKPOINTS_DIR)
-	cd $(TOOLS_DIR) && $(PYTHON) train.py
+	$(PYTHON) $(TOOLS_DIR)/train.py
 
 $(CHECKPOINTS_DIR)/quantized_ultra_tiny_cnn.pt: $(TOOLS_DIR)/quantize.py $(CHECKPOINTS_DIR)/best_ultra_tiny_cnn.pt
-	cd $(TOOLS_DIR) && $(PYTHON) quantize.py
+	$(PYTHON) $(TOOLS_DIR)/quantize.py
 
-$(PROJECT_ROOT)/source/model.h: $(TOOLS_DIR)/export_model.py $(CHECKPOINTS_DIR)/quantized_ultra_tiny_cnn.pt
-	cd $(TOOLS_DIR) && $(PYTHON) export_model.py
+$(SOURCE_DIR)/model.h: $(TOOLS_DIR)/export_model.py $(CHECKPOINTS_DIR)/quantized_ultra_tiny_cnn.pt
+	$(PYTHON) $(TOOLS_DIR)/export_model.py
 
 test_vectors.npz: $(TOOLS_DIR)/validate.py $(CHECKPOINTS_DIR)/quantized_ultra_tiny_cnn.pt $(CHECKPOINTS_DIR)/best_ultra_tiny_cnn.pt
-	cd $(TOOLS_DIR) && $(PYTHON) validate.py
+	$(PYTHON) $(TOOLS_DIR)/validate.py
 
-# Run on emulator
-run: $(OUTPUT).nds
+run: $(BUILD_DIR)/$(TARGET).nds
 	melonDS $<
 
-# Clean
 clean:
-	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nds
+	rm -rf $(BUILD_DIR)
+	rm -f $(SOURCE_DIR)/model.h
+	rm -f test_vectors.npz
 
 clean-all: clean
-	@rm -rf $(CHECKPOINTS_DIR)
-	@rm -rf $(TOOLS_DIR)/data
-	@rm -f $(CURDIR)/source/model.h
-	@rm -f test_vectors.npz
-
-else
-
-#---------------------------------------------------------------------------------
-# Running from project root - recursive make
-#---------------------------------------------------------------------------------
-
-all: $(BUILD)
-
-$(BUILD):
-	@mkdir -p $@
-	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
-
-endif
+	rm -rf $(CHECKPOINTS_DIR)
+	rm -rf $(TOOLS_DIR)/data
